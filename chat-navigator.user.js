@@ -2,7 +2,7 @@
 // @name         Chat Navigator - Gemini & ChatGPT
 // @author       小麦汁
 // @namespace    http://tampermonkey.net/
-// @version      2.6
+// @version      2.7
 // @description  快速定位 Gemini 和 ChatGPT 历史对话，点击跳转到对应位置
 // @match        https://gemini.google.com/*
 // @match        https://chatgpt.com/*
@@ -932,22 +932,16 @@
 
   function navigateToMatch(idx) {
     if (matchList.length === 0) return;
-    const match = matchList[((idx % matchList.length) + matchList.length) % matchList.length];
+    idx = ((idx % matchList.length) + matchList.length) % matchList.length;
+    const match = matchList[idx];
     if (match && !document.contains(match.textNode)) {
       buildMatchList();
       updateMatchCounter();
       if (matchList.length === 0) return;
+      idx = ((idx % matchList.length) + matchList.length) % matchList.length;
     }
     const oldAnchor = document.getElementById('__cnav_anchor__');
     if (oldAnchor) oldAnchor.remove();
-    const keepIdx = idx;
-    buildMatchList();
-    if (matchList.length === 0) {
-      updateMatchCounter();
-      return;
-    }
-    idx = keepIdx;
-    idx = ((idx % matchList.length) + matchList.length) % matchList.length;
     currentMatchIdx = idx;
     const { el, textNode, start, end } = matchList[idx];
     const range = document.createRange();
@@ -962,9 +956,15 @@
       transition: 'opacity 0.8s',
     });
     range.insertNode(span);
+    const spanParent = span.parentNode;
     span.scrollIntoView({ behavior: 'smooth', block: 'center' });
     setTimeout(() => { span.style.opacity = '0'; }, 800);
-    setTimeout(() => { span.remove(); }, 1600);
+    setTimeout(() => {
+      span.remove();
+      if (spanParent && document.contains(spanParent)) {
+        spanParent.normalize();
+      }
+    }, 1600);
     activeIndex = matchList[idx].msgIndex;
     renderList();
     updateMatchCounter();
@@ -1100,7 +1100,6 @@
 
   function startMonitoring() {
     setupObserver();
-    startKeepAlive();
     if (panelOpen) {
       refresh();
       startTryRefreshLoop();
@@ -1109,7 +1108,6 @@
 
   function stopMonitoring() {
     stopObserver();
-    stopKeepAlive();
     stopPendingRefreshes();
     allMessages = [];
     activeIndex = -1;
@@ -1139,6 +1137,7 @@
       return;
     }
     inject();
+    startKeepAlive();
     renderList();
     if (monitoringEnabled) startMonitoring();
   }
