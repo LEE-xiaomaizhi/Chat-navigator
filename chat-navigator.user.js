@@ -2,7 +2,7 @@
 // @name         Chat Navigator - Gemini & ChatGPT
 // @author       小麦汁
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      2.6
 // @description  快速定位 Gemini 和 ChatGPT 历史对话，点击跳转到对应位置
 // @match        https://gemini.google.com/*
 // @match        https://chatgpt.com/*
@@ -73,6 +73,8 @@
   const POS_KEY = '__cnav_pos__';
   const SIZE_KEY = '__cnav_size__';
   const OPEN_KEY = '__cnav_open__';
+  const MORE_KEY = '__cnav_more__';
+  const CASE_KEY = '__cnav_case__';
   const MONITOR_KEY = '__cnav_monitor__';
   let storedOpenState = localStorage.getItem(OPEN_KEY);
   if (storedOpenState !== 'true' && storedOpenState !== 'false') {
@@ -86,15 +88,20 @@
     localStorage.setItem(MONITOR_KEY, storedMonitorState);
   }
   let monitoringEnabled = storedMonitorState === 'on';
+  let caseSensitive = false;
   let allMessages = [], filterText = '', activeIndex = -1;
   let matchList = [], currentMatchIdx = -1;
   let lastMessageSignature = null;
   let shadowQueryCache = null, shadowQueryCacheTime = 0, lastUrl = location.href;
   let panel, toggle, list, searchInput, countSpan, matchCounter;
-  let headerEl, searchDivEl, btnMonitor, btnExport, btnTheme, btnRefresh, btnClose, btnPrev, btnNext;
+  let headerEl, secondaryBar, searchDivEl, btnMore, btnMonitor, btnCase, btnExport, btnTheme, btnRefresh, btnClose, btnPrev, btnNext;
   let dragging = false, offX = 0, offY = 0;
-  let resizing = false, resStartX = 0, resStartY = 0, resStartW = 0, resStartH = 0;
-  let observer = null, keepAliveObserver = null, keepAliveTimer = null, refreshTimer = null, tryRefreshTimer = null;
+  let resizing = false;
+  let resDir = {};
+  let resStartX = 0, resStartY = 0;
+  let resStartW = 0, resStartH = 0;
+  let resStartLeft = 0;
+  let observer = null, keepAliveObserver = null, keepAliveTimer = null, refreshTimer = null, tryRefreshTimer = null, searchDebounceTimer = null;
 
   // ── 创建按钮 ──────────────────────────────────────────────────────────────
   function makeBtn(text, title) {
@@ -205,20 +212,32 @@
     btnMonitor.title = monitoringEnabled ? '暂停监控' : '启用监控';
   }
 
+  function setMoreOpen(open) {
+    if (secondaryBar) css(secondaryBar, { display: open ? 'flex' : 'none' });
+    if (btnMore) {
+      btnMore.textContent = '⚙';
+      css(btnMore, { color: open ? T().activeBorder : T().btnColor });
+    }
+    localStorage.setItem(MORE_KEY, open ? 'true' : 'false');
+  }
+
   // ── 应用主题到所有元素 ────────────────────────────────────────────────────
   function applyTheme() {
     const t = T();
     if (panel)     css(panel, { background: t.panelBg, color: t.text, 'box-shadow': t.shadow });
     if (headerEl)  css(headerEl, { background: t.headerBg, color: t.text });
+    if (secondaryBar) css(secondaryBar, { background: t.headerBg, 'border-bottom': '1px solid ' + t.borderLine });
     if (countSpan) css(countSpan, { color: t.textMuted });
     if (matchCounter) css(matchCounter, { color: t.textMuted });
     if (searchDivEl) css(searchDivEl, { background: t.searchBg, 'border-bottom': '1px solid ' + t.borderLine });
     if (searchInput) css(searchInput, { background: t.inputBg, border: '1px solid ' + t.inputBorder, color: t.text });
     if (toggle)    css(toggle, { background: t.toggleBg, border: '1px solid ' + t.toggleBorder, color: t.toggleColor });
     // 按钮颜色
-    [btnMonitor, btnExport, btnTheme, btnRefresh, btnClose, btnPrev, btnNext].forEach(b => {
+    [btnTheme, btnRefresh, btnClose, btnMore, btnExport, btnMonitor, btnPrev, btnNext].forEach(b => {
       if (b) css(b, { color: t.btnColor });
     });
+    if (btnMore) css(btnMore, { color: localStorage.getItem(MORE_KEY) === 'true' ? t.activeBorder : t.btnColor });
+    if (btnCase) css(btnCase, { color: caseSensitive ? t.activeBorder : t.btnColor });
     updateMonitorButton();
     if (btnTheme) btnTheme.textContent = isDark ? '☀' : '🌙';
     updateStyleTag();
@@ -264,19 +283,40 @@
 
     const btnsDiv = document.createElement('span');
     css(btnsDiv, { display: 'flex', gap: '4px' });
-    btnMonitor = makeBtn(monitoringEnabled ? '▶' : '⏸', monitoringEnabled ? '暂停监控' : '启用监控');
-    btnExport  = makeBtn('↓', '导出对话');
-    btnTheme   = makeBtn(isDark ? '☀' : '🌙', '切换主题');
+    btnMore    = makeBtn('⚙', '更多选项');
     btnRefresh = makeBtn('↻', '刷新');
     btnClose   = makeBtn('×', '收起');
-    btnsDiv.appendChild(btnMonitor);
-    btnsDiv.appendChild(btnExport);
-    btnsDiv.appendChild(btnTheme);
+    btnsDiv.appendChild(btnMore);
     btnsDiv.appendChild(btnRefresh);
     btnsDiv.appendChild(btnClose);
 
     headerEl.appendChild(titleSpan);
     headerEl.appendChild(btnsDiv);
+
+    secondaryBar = document.createElement('div');
+    secondaryBar.id = '__cnav_secondary__';
+    css(secondaryBar, {
+      display: 'none',
+      'align-items': 'center',
+      'justify-content': 'flex-end',
+      gap: '4px',
+      padding: '4px 10px',
+      'border-bottom': '1px solid ' + t.borderLine,
+      background: t.headerBg,
+      'flex-shrink': '0',
+    });
+    const barLabel = document.createElement('span');
+    barLabel.textContent = '更多选项';
+    css(barLabel, { flex: '1', color: t.textMuted, 'font-size': '11px' });
+    btnCase    = makeBtn('Aa', '大小写敏感');
+    btnExport  = makeBtn('↓', '导出对话');
+    btnTheme   = makeBtn(isDark ? '☀' : '🌙', '切换主题');
+    btnMonitor = makeBtn(monitoringEnabled ? '▶' : '⏸', monitoringEnabled ? '暂停监控' : '启用监控');
+    secondaryBar.appendChild(barLabel);
+    secondaryBar.appendChild(btnCase);
+    secondaryBar.appendChild(btnExport);
+    secondaryBar.appendChild(btnTheme);
+    secondaryBar.appendChild(btnMonitor);
 
     // --- 搜索栏 ---
     searchDivEl = document.createElement('div');
@@ -310,17 +350,22 @@
     css(list, { 'overflow-y': 'auto', flex: '1', padding: '6px 0' });
 
     panel.appendChild(headerEl);
+    panel.appendChild(secondaryBar);
     panel.appendChild(searchDivEl);
     panel.appendChild(list);
 
-    const resizeHandle = document.createElement('div');
-    resizeHandle.id = '__cnav_resize__';
-    css(resizeHandle, {
-      position: 'absolute', bottom: '0', right: '0',
-      width: '14px', height: '14px', cursor: 'se-resize',
-      'z-index': '1',
-    });
-    panel.appendChild(resizeHandle);
+    function makeResizeHandle(id, styles, dir) {
+      const h = document.createElement('div');
+      h.id = id;
+      css(h, { position: 'absolute', 'z-index': '10', ...styles });
+      h.addEventListener('mousedown', e => onResizeStart(e, dir));
+      panel.appendChild(h);
+    }
+    makeResizeHandle('__cnav_resize_e__', { top: '12px', right: '0', width: '5px', bottom: '12px', cursor: 'e-resize' }, { e: true });
+    makeResizeHandle('__cnav_resize_w__', { top: '12px', left: '0', width: '5px', bottom: '12px', cursor: 'w-resize' }, { w: true });
+    makeResizeHandle('__cnav_resize_s__', { bottom: '0', left: '12px', right: '12px', height: '5px', cursor: 's-resize' }, { s: true });
+    makeResizeHandle('__cnav_resize_se__', { bottom: '0', right: '0', width: '14px', height: '14px', cursor: 'se-resize' }, { e: true, s: true });
+    makeResizeHandle('__cnav_resize_sw__', { bottom: '0', left: '0', width: '14px', height: '14px', cursor: 'sw-resize' }, { w: true, s: true });
 
     // --- 圆形切换按钮 ---
     toggle = document.createElement('div');
@@ -343,11 +388,31 @@
     });
 
     // --- 事件 ---
+    btnMore.addEventListener('click', e => {
+      e.stopPropagation();
+      const isOpen = secondaryBar.style.getPropertyValue('display') !== 'flex';
+      setMoreOpen(isOpen);
+    });
+    btnMore.addEventListener('mouseleave', () => {
+      css(btnMore, { color: localStorage.getItem(MORE_KEY) === 'true' ? T().activeBorder : T().btnColor, background: 'none' });
+    });
     btnTheme.addEventListener('click', e => {
       e.stopPropagation();
       isDark = !isDark;
       localStorage.setItem('__cnav_theme__', isDark ? 'dark' : 'light');
       applyTheme();
+    });
+    btnCase.addEventListener('click', e => {
+      e.stopPropagation();
+      caseSensitive = !caseSensitive;
+      localStorage.setItem(CASE_KEY, caseSensitive ? 'true' : 'false');
+      css(btnCase, { color: caseSensitive ? T().activeBorder : T().btnColor });
+      renderList();
+      buildMatchList();
+      updateMatchCounter();
+    });
+    btnCase.addEventListener('mouseleave', () => {
+      css(btnCase, { color: caseSensitive ? T().activeBorder : T().btnColor, background: 'none' });
     });
     btnMonitor.addEventListener('click', e => {
       e.stopPropagation();
@@ -374,16 +439,12 @@
     });
     searchInput.addEventListener('input', () => {
       filterText = searchInput.value;
-      renderList();
-      if (filterText) {
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(() => {
+        renderList();
         buildMatchList();
-      } else {
-        matchList = [];
-        currentMatchIdx = -1;
-        const oldAnchor = document.getElementById('__cnav_anchor__');
-        if (oldAnchor) oldAnchor.remove();
-      }
-      updateMatchCounter();
+        updateMatchCounter();
+      }, 300);
     });
     searchInput.addEventListener('keydown', e => {
       if (e.key !== 'Enter') return;
@@ -402,22 +463,12 @@
       navigateToMatch(currentMatchIdx + 1);
     });
 
-    resizeHandle.addEventListener('mousedown', e => {
-      resizing = true;
-      resStartX = e.clientX;
-      resStartY = e.clientY;
-      resStartW = panel.offsetWidth;
-      resStartH = panel.offsetHeight;
-      e.stopPropagation();
-      document.addEventListener('mousemove', onDragMove);
-      document.addEventListener('mouseup', onDragEnd);
-    });
-
     document.removeEventListener('keydown', onGlobalKeyDown);
     document.addEventListener('keydown', onGlobalKeyDown);
 
     // 拖拽
     headerEl.addEventListener('mousedown', e => {
+      if (resizing) return;
       dragging = true;
       const r = panel.getBoundingClientRect();
       offX = e.clientX - r.left;
@@ -425,15 +476,11 @@
       document.addEventListener('mousemove', onDragMove);
       document.addEventListener('mouseup', onDragEnd);
     });
+    window.removeEventListener('resize', clampPosition);
+    window.addEventListener('resize', clampPosition);
   }
 
   function onDragMove(e) {
-    if (resizing) {
-      const newW = Math.max(220, resStartW + e.clientX - resStartX);
-      const newH = Math.max(200, resStartH + e.clientY - resStartY);
-      css(panel, { width: newW + 'px', 'max-height': newH + 'px' });
-      return;
-    }
     if (!dragging) return;
     css(panel, { left: (e.clientX - offX) + 'px', top: (e.clientY - offY) + 'px', right: 'auto' });
   }
@@ -443,12 +490,56 @@
       dragging = false;
       savePanelPosition();
     }
-    if (resizing) {
-      resizing = false;
-      savePanelSize();
-    }
     document.removeEventListener('mousemove', onDragMove);
     document.removeEventListener('mouseup', onDragEnd);
+  }
+
+  function onResizeStart(e, dir) {
+    e.stopPropagation();
+    e.preventDefault();
+    resizing = true;
+    resDir = dir;
+    resStartX = e.clientX;
+    resStartY = e.clientY;
+    resStartW = panel.offsetWidth;
+    resStartH = panel.offsetHeight;
+    resStartLeft = parseFloat(panel.style.getPropertyValue('left')) || panel.getBoundingClientRect().left;
+    document.addEventListener('mousemove', onResizeMove);
+    document.addEventListener('mouseup', onResizeEnd);
+  }
+
+  function onResizeMove(e) {
+    if (!resizing) return;
+    const dx = e.clientX - resStartX;
+    const dy = e.clientY - resStartY;
+
+    if (resDir.e) {
+      const newW = Math.max(220, resStartW + dx);
+      css(panel, { width: newW + 'px' });
+    }
+    if (resDir.w) {
+      const newW = Math.max(220, resStartW - dx);
+      const newLeft = resStartLeft + (resStartW - newW);
+      css(panel, { width: newW + 'px', left: newLeft + 'px', right: 'auto' });
+    }
+    if (resDir.s) {
+      const newH = Math.max(200, resStartH + dy);
+      css(panel, { 'max-height': newH + 'px' });
+    }
+  }
+
+  function onResizeEnd() {
+    if (!resizing) return;
+    resizing = false;
+    resDir = {};
+    document.removeEventListener('mousemove', onResizeMove);
+    document.removeEventListener('mouseup', onResizeEnd);
+    const w = panel.offsetWidth;
+    const h = panel.offsetHeight;
+    localStorage.setItem(SIZE_KEY, JSON.stringify({ w, h }));
+    const left = parseFloat(panel.style.getPropertyValue('left')) || panel.getBoundingClientRect().left;
+    const top  = parseFloat(panel.style.getPropertyValue('top'))  || panel.getBoundingClientRect().top;
+    localStorage.setItem(POS_KEY, JSON.stringify({ top, left }));
   }
 
   function onGlobalKeyDown(e) {
@@ -481,6 +572,7 @@
       if (el) el.remove();
     });
     updateStyleTag();
+    caseSensitive = localStorage.getItem(CASE_KEY) === 'true';
     buildPanel();
     document.body.appendChild(panel);
     document.body.appendChild(toggle);
@@ -490,6 +582,8 @@
     }
     applySavedPosition();
     applySavedSize();
+    setMoreOpen(localStorage.getItem(MORE_KEY) === 'true');
+    if (btnCase) css(btnCase, { color: caseSensitive ? T().activeBorder : T().btnColor });
     panelOpen = localStorage.getItem(OPEN_KEY) !== 'false';
     if (!panelOpen) {
       css(panel, { display: 'none' });
@@ -533,6 +627,34 @@
       css(panel, { top: (scrollY + 80) + 'px', left: (scrollX + window.innerWidth - 260 - 16) + 'px', right: 'auto' });
     }
     css(toggle, { top: (scrollY + 80) + 'px', left: (scrollX + window.innerWidth - 38 - 16) + 'px', right: 'auto' });
+  }
+
+  function clampPosition() {
+    if (!panel) return;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    const panelHidden = panel.style.getPropertyValue('display') === 'none';
+    if (!panelHidden) {
+      const pw = panel.offsetWidth;
+      const ph = panel.offsetHeight;
+      let top  = parseFloat(panel.style.getPropertyValue('top'))  || panel.getBoundingClientRect().top;
+      let left = parseFloat(panel.style.getPropertyValue('left')) || panel.getBoundingClientRect().left;
+      top  = Math.min(Math.max(top,  0), vh - 40);
+      left = Math.min(Math.max(left, 0), vw - Math.min(pw, vw));
+      css(panel, { top: top + 'px', left: left + 'px', right: 'auto' });
+    }
+
+    let tTop  = parseFloat(toggle.style.getPropertyValue('top'))  || toggle.getBoundingClientRect().top;
+    let tLeft = parseFloat(toggle.style.getPropertyValue('left')) || toggle.getBoundingClientRect().left;
+    tTop  = Math.min(Math.max(tTop,  0), vh - 40);
+    tLeft = Math.min(Math.max(tLeft, 0), vw - 40);
+    css(toggle, { top: tTop + 'px', left: tLeft + 'px', right: 'auto' });
+
+    localStorage.setItem(POS_KEY, JSON.stringify({
+      top:  parseFloat(panel.style.getPropertyValue('top')),
+      left: parseFloat(panel.style.getPropertyValue('left')),
+    }));
   }
 
   // ── 消息抓取：ChatGPT ─────────────────────────────────────────────────────
@@ -687,8 +809,13 @@
       list.appendChild(paused);
       return;
     }
-    const lf = filterText.toLowerCase();
-    const shown = filterText ? allMessages.filter(m => m.text.toLowerCase().includes(lf)) : allMessages;
+    const needle = caseSensitive ? filterText : filterText.toLowerCase();
+    const shown = filterText
+      ? allMessages.filter(m => {
+        const haystack = caseSensitive ? m.text : m.text.toLowerCase();
+        return haystack.includes(needle);
+      })
+      : allMessages;
 
     if (shown.length === 0) {
       const empty = document.createElement('div');
@@ -728,17 +855,18 @@
       const txtSpan = document.createElement('span');
       if (filterText) {
         const displayText = preview || '（无文字内容）';
-        const re = new RegExp('(' + filterText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
-        displayText.split(re).forEach(part => {
-          if (part.toLowerCase() === lf) {
-            const mark = document.createElement('mark');
-            mark.textContent = part;
-            css(mark, { background: t.activeBorder, color: t.panelBg, 'border-radius': '2px', padding: '0 2px', 'font-style': 'normal' });
-            txtSpan.appendChild(mark);
-          } else {
-            txtSpan.appendChild(document.createTextNode(part));
-          }
-        });
+        const haystack = caseSensitive ? displayText : displayText.toLowerCase();
+        let pos = 0, last = 0;
+        while ((pos = haystack.indexOf(needle, pos)) !== -1) {
+          if (pos > last) txtSpan.appendChild(document.createTextNode(displayText.slice(last, pos)));
+          const mark = document.createElement('mark');
+          mark.textContent = displayText.slice(pos, pos + filterText.length);
+          css(mark, { background: t.activeBorder, color: t.panelBg, 'border-radius': '2px', padding: '0 2px', 'font-style': 'normal' });
+          txtSpan.appendChild(mark);
+          pos += filterText.length;
+          last = pos;
+        }
+        if (last < displayText.length) txtSpan.appendChild(document.createTextNode(displayText.slice(last)));
       } else {
         txtSpan.textContent = preview || '（无文字内容）';
       }
@@ -782,14 +910,14 @@
     matchList = [];
     currentMatchIdx = -1;
     if (!filterText) return;
-    const kw = filterText.toLowerCase();
+    const needle = caseSensitive ? filterText : filterText.toLowerCase();
     allMessages.forEach(({ el, index }) => {
       const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
       let node;
       while ((node = walker.nextNode())) {
-        const text = node.textContent.toLowerCase();
+        const haystack = caseSensitive ? node.textContent : node.textContent.toLowerCase();
         let pos = 0;
-        while ((pos = text.indexOf(kw, pos)) !== -1) {
+        while ((pos = haystack.indexOf(needle, pos)) !== -1) {
           matchList.push({ el, textNode: node, start: pos, end: pos + filterText.length, msgIndex: index });
           pos += filterText.length;
         }
@@ -804,6 +932,12 @@
 
   function navigateToMatch(idx) {
     if (matchList.length === 0) return;
+    const match = matchList[((idx % matchList.length) + matchList.length) % matchList.length];
+    if (match && !document.contains(match.textNode)) {
+      buildMatchList();
+      updateMatchCounter();
+      if (matchList.length === 0) return;
+    }
     const oldAnchor = document.getElementById('__cnav_anchor__');
     if (oldAnchor) oldAnchor.remove();
     const keepIdx = idx;
@@ -882,7 +1016,7 @@
 
   function isOwnNode(node) {
     if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
-    return node.closest('#__cnav_panel, #__cnav_toggle, #__cnav_style__, #__cnav_anchor__, #__cnav_resize__');
+    return node.closest('#__cnav_panel, #__cnav_toggle, #__cnav_style__, #__cnav_anchor__, #__cnav_resize_e__, #__cnav_resize_w__, #__cnav_resize_s__, #__cnav_resize_se__, #__cnav_resize_sw__, #__cnav_secondary__');
   }
 
   function mutationIsOwnChange(mutation) {
