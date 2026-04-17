@@ -2,7 +2,7 @@
 // @name         Chat Navigator - Gemini & ChatGPT
 // @author       小麦汁
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.2
 // @description  快速定位 Gemini 和 ChatGPT 历史对话，点击跳转到对应位置
 // @match        https://gemini.google.com/*
 // @match        https://chatgpt.com/*
@@ -87,10 +87,11 @@
   }
   let monitoringEnabled = storedMonitorState === 'on';
   let allMessages = [], filterText = '', activeIndex = -1;
+  let matchList = [], currentMatchIdx = -1;
   let lastMessageSignature = null;
   let shadowQueryCache = null, shadowQueryCacheTime = 0, lastUrl = location.href;
-  let panel, toggle, list, searchInput, countSpan;
-  let headerEl, searchDivEl, btnMonitor, btnExport, btnTheme, btnRefresh, btnClose;
+  let panel, toggle, list, searchInput, countSpan, matchCounter;
+  let headerEl, searchDivEl, btnMonitor, btnExport, btnTheme, btnRefresh, btnClose, btnPrev, btnNext;
   let dragging = false, offX = 0, offY = 0;
   let resizing = false, resStartX = 0, resStartY = 0, resStartW = 0, resStartH = 0;
   let observer = null, keepAliveObserver = null, keepAliveTimer = null, refreshTimer = null, tryRefreshTimer = null;
@@ -210,11 +211,12 @@
     if (panel)     css(panel, { background: t.panelBg, color: t.text, 'box-shadow': t.shadow });
     if (headerEl)  css(headerEl, { background: t.headerBg, color: t.text });
     if (countSpan) css(countSpan, { color: t.textMuted });
+    if (matchCounter) css(matchCounter, { color: t.textMuted });
     if (searchDivEl) css(searchDivEl, { background: t.searchBg, 'border-bottom': '1px solid ' + t.borderLine });
     if (searchInput) css(searchInput, { background: t.inputBg, border: '1px solid ' + t.inputBorder, color: t.text });
     if (toggle)    css(toggle, { background: t.toggleBg, border: '1px solid ' + t.toggleBorder, color: t.toggleColor });
     // 按钮颜色
-    [btnMonitor, btnExport, btnTheme, btnRefresh, btnClose].forEach(b => {
+    [btnMonitor, btnExport, btnTheme, btnRefresh, btnClose, btnPrev, btnNext].forEach(b => {
       if (b) css(b, { color: t.btnColor });
     });
     updateMonitorButton();
@@ -278,17 +280,29 @@
 
     // --- 搜索栏 ---
     searchDivEl = document.createElement('div');
-    css(searchDivEl, { padding: '8px 10px', background: t.searchBg, 'border-bottom': '1px solid ' + t.borderLine, 'flex-shrink': '0' });
+    css(searchDivEl, { display: 'flex', 'align-items': 'center', gap: '4px', padding: '8px 10px', background: t.searchBg, 'border-bottom': '1px solid ' + t.borderLine, 'flex-shrink': '0' });
     searchInput = document.createElement('input');
     searchInput.type = 'text';
     searchInput.placeholder = '搜索对话内容…';
     css(searchInput, {
-      width: '100%', background: t.inputBg, border: '1px solid ' + t.inputBorder,
+      width: 'calc(100% - 80px)', background: t.inputBg, border: '1px solid ' + t.inputBorder,
       'border-radius': '6px', color: t.text, padding: '5px 8px',
       'font-size': '12px', outline: 'none', 'box-sizing': 'border-box',
       'font-family': 'inherit',
     });
+    const searchBtnsDiv = document.createElement('span');
+    css(searchBtnsDiv, { display: 'flex', 'align-items': 'center', gap: '2px', 'flex-shrink': '0' });
+    matchCounter = document.createElement('span');
+    css(matchCounter, { width: '36px', color: t.textMuted, 'font-size': '11px', 'text-align': 'center' });
+    btnPrev = makeBtn('▲', '上一个匹配');
+    btnNext = makeBtn('▼', '下一个匹配');
+    css(btnPrev, { 'font-size': '12px' });
+    css(btnNext, { 'font-size': '12px' });
+    searchBtnsDiv.appendChild(matchCounter);
+    searchBtnsDiv.appendChild(btnPrev);
+    searchBtnsDiv.appendChild(btnNext);
     searchDivEl.appendChild(searchInput);
+    searchDivEl.appendChild(searchBtnsDiv);
 
     // --- 列表 ---
     list = document.createElement('div');
@@ -361,22 +375,31 @@
     searchInput.addEventListener('input', () => {
       filterText = searchInput.value;
       renderList();
+      if (filterText) {
+        buildMatchList();
+      } else {
+        matchList = [];
+        currentMatchIdx = -1;
+        const oldAnchor = document.getElementById('__cnav_anchor__');
+        if (oldAnchor) oldAnchor.remove();
+      }
+      updateMatchCounter();
     });
     searchInput.addEventListener('keydown', e => {
       if (e.key !== 'Enter') return;
       e.preventDefault();
-      const lf = filterText.toLowerCase();
-      const shown = filterText ? allMessages.filter(m => m.text.toLowerCase().includes(lf)) : allMessages;
-      if (shown.length === 0) return;
-      let pos = shown.findIndex(m => m.index === activeIndex);
-      pos = e.shiftKey ? (pos <= 0 ? shown.length - 1 : pos - 1) : (pos >= shown.length - 1 ? 0 : pos + 1);
-      activeIndex = shown[pos].index;
-      if (filterText) {
-        scrollToMatch(shown[pos].el, filterText);
-      } else {
-        shown[pos].el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }
-      renderList();
+      if (matchList.length === 0 && filterText) buildMatchList();
+      navigateToMatch(e.shiftKey ? currentMatchIdx - 1 : currentMatchIdx + 1);
+    });
+    btnPrev.addEventListener('click', e => {
+      e.stopPropagation();
+      if (matchList.length === 0 && filterText) buildMatchList();
+      navigateToMatch(currentMatchIdx - 1);
+    });
+    btnNext.addEventListener('click', e => {
+      e.stopPropagation();
+      if (matchList.length === 0 && filterText) buildMatchList();
+      navigateToMatch(currentMatchIdx + 1);
     });
 
     resizeHandle.addEventListener('mousedown', e => {
@@ -732,7 +755,15 @@
       item.addEventListener('click', () => {
         activeIndex = index;
         if (filterText) {
-          scrollToMatch(el, filterText);
+          if (matchList.length === 0) buildMatchList();
+          const firstIdx = matchList.findIndex(m => m.msgIndex === index);
+          if (firstIdx !== -1) {
+            navigateToMatch(firstIdx);
+            return;
+          }
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          el.style.outline = '2px solid ' + t.activeBorder;
+          setTimeout(() => { el.style.outline = ''; }, 1200);
         } else {
           el.scrollIntoView({ behavior: 'smooth', block: 'start' });
           el.style.outline = '2px solid ' + t.activeBorder;
@@ -745,35 +776,64 @@
     });
   }
 
-  function scrollToMatch(el, keyword) {
-    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
-    let node;
-    while ((node = walker.nextNode())) {
-      const text = node.textContent || '';
-      const matchIndex = text.toLowerCase().indexOf(keyword.toLowerCase());
-      if (matchIndex === -1) continue;
+  function buildMatchList() {
+    const oldAnchor = document.getElementById('__cnav_anchor__');
+    if (oldAnchor) oldAnchor.remove();
+    matchList = [];
+    currentMatchIdx = -1;
+    if (!filterText) return;
+    const kw = filterText.toLowerCase();
+    allMessages.forEach(({ el, index }) => {
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
+      let node;
+      while ((node = walker.nextNode())) {
+        const text = node.textContent.toLowerCase();
+        let pos = 0;
+        while ((pos = text.indexOf(kw, pos)) !== -1) {
+          matchList.push({ el, textNode: node, start: pos, end: pos + filterText.length, msgIndex: index });
+          pos += filterText.length;
+        }
+      }
+    });
+  }
 
-      const range = document.createRange();
-      range.setStart(node, matchIndex);
-      range.setEnd(node, matchIndex + keyword.length);
-      const span = document.createElement('span');
-      span.id = '__cnav_anchor__';
-      css(span, {
-        background: T().activeBorder, color: T().panelBg,
-        'border-radius': '2px', padding: '0 2px',
-        'font-size': 'inherit', 'line-height': 'inherit',
-        transition: 'opacity 0.8s',
-      });
-      range.insertNode(span);
-      span.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      setTimeout(() => { span.style.opacity = '0'; }, 800);
-      setTimeout(() => { span.remove(); }, 1600);
+  function updateMatchCounter() {
+    if (!matchCounter) return;
+    matchCounter.textContent = matchList.length === 0 ? '' : (currentMatchIdx + 1) + '/' + matchList.length;
+  }
+
+  function navigateToMatch(idx) {
+    if (matchList.length === 0) return;
+    const oldAnchor = document.getElementById('__cnav_anchor__');
+    if (oldAnchor) oldAnchor.remove();
+    const keepIdx = idx;
+    buildMatchList();
+    if (matchList.length === 0) {
+      updateMatchCounter();
       return;
     }
-
-    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    el.style.outline = '2px solid ' + T().activeBorder;
-    setTimeout(() => { el.style.outline = ''; }, 1200);
+    idx = keepIdx;
+    idx = ((idx % matchList.length) + matchList.length) % matchList.length;
+    currentMatchIdx = idx;
+    const { el, textNode, start, end } = matchList[idx];
+    const range = document.createRange();
+    range.setStart(textNode, start);
+    range.setEnd(textNode, end);
+    const span = document.createElement('span');
+    span.id = '__cnav_anchor__';
+    css(span, {
+      background: T().activeBorder, color: T().panelBg,
+      'border-radius': '2px', padding: '0 2px',
+      'font-size': 'inherit', 'line-height': 'inherit',
+      transition: 'opacity 0.8s',
+    });
+    range.insertNode(span);
+    span.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(() => { span.style.opacity = '0'; }, 800);
+    setTimeout(() => { span.remove(); }, 1600);
+    activeIndex = matchList[idx].msgIndex;
+    renderList();
+    updateMatchCounter();
   }
 
   function refresh() {
@@ -785,7 +845,10 @@
     if (!monitoringEnabled) {
       allMessages = [];
       lastMessageSignature = null;
+      matchList = [];
+      currentMatchIdx = -1;
       renderList();
+      updateMatchCounter();
       if (usingAbsolute) updateAbsolutePosition();
       return;
     }
@@ -806,6 +869,10 @@
     lastMessageSignature = signature;
     allMessages = raw.map((m, i) => ({ ...m, index: i }));
     renderList();
+    if (filterText) {
+      buildMatchList();
+      updateMatchCounter();
+    }
     if (usingAbsolute) updateAbsolutePosition();
     console.log('[ChatNav] refreshed, found', allMessages.length, 'messages');
   }
