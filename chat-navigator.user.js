@@ -2,7 +2,7 @@
 // @name         Chat Navigator - Gemini & ChatGPT
 // @author       小麦汁
 // @namespace    http://tampermonkey.net/
-// @version      1.7
+// @version      1.8
 // @description  快速定位 Gemini 和 ChatGPT 历史对话，点击跳转到对应位置
 // @match        https://gemini.google.com/*
 // @match        https://chatgpt.com/*
@@ -71,7 +71,14 @@
 
   // ── 状态 ──────────────────────────────────────────────────────────────────
   const POS_KEY = '__cnav_pos__';
+  const OPEN_KEY = '__cnav_open__';
   const MONITOR_KEY = '__cnav_monitor__';
+  let storedOpenState = localStorage.getItem(OPEN_KEY);
+  if (storedOpenState !== 'true' && storedOpenState !== 'false') {
+    storedOpenState = 'true';
+    localStorage.setItem(OPEN_KEY, storedOpenState);
+  }
+  let panelOpen = storedOpenState !== 'false';
   let storedMonitorState = localStorage.getItem(MONITOR_KEY);
   if (storedMonitorState !== 'on' && storedMonitorState !== 'off') {
     storedMonitorState = 'off';
@@ -83,7 +90,7 @@
   let panel, toggle, list, searchInput, countSpan;
   let headerEl, searchDivEl, btnMonitor, btnTheme, btnRefresh, btnClose;
   let dragging = false, offX = 0, offY = 0;
-  let observer = null, keepAliveTimer = null, refreshTimer = null, tryRefreshTimer = null;
+  let observer = null, keepAliveObserver = null, keepAliveTimer = null, refreshTimer = null, tryRefreshTimer = null;
 
   // ── 创建按钮 ──────────────────────────────────────────────────────────────
   function makeBtn(text, title) {
@@ -268,10 +275,14 @@
       e.stopPropagation();
       css(panel, { display: 'none' });
       css(toggle, { display: 'flex' });
+      panelOpen = false;
+      localStorage.setItem(OPEN_KEY, 'false');
     });
     toggle.addEventListener('click', () => {
       css(panel, { display: 'flex' });
       css(toggle, { display: 'none' });
+      panelOpen = true;
+      localStorage.setItem(OPEN_KEY, 'true');
       refresh();
     });
     searchInput.addEventListener('input', () => {
@@ -315,7 +326,16 @@
     buildPanel();
     document.body.appendChild(panel);
     document.body.appendChild(toggle);
+    if (keepAliveTimer !== null) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    }
     applySavedPosition();
+    panelOpen = localStorage.getItem(OPEN_KEY) !== 'false';
+    if (!panelOpen) {
+      css(panel, { display: 'none' });
+      css(toggle, { display: 'flex' });
+    }
     console.log('[ChatNav] panel injected');
     setTimeout(fixPositionFallback, 600);
   }
@@ -535,7 +555,22 @@
       });
 
       const txtSpan = document.createElement('span');
-      txtSpan.textContent = preview || '（无文字内容）';
+      if (filterText) {
+        const displayText = preview || '（无文字内容）';
+        const re = new RegExp('(' + filterText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+        displayText.split(re).forEach(part => {
+          if (part.toLowerCase() === lf) {
+            const mark = document.createElement('mark');
+            mark.textContent = part;
+            css(mark, { background: t.activeBorder, color: t.panelBg, 'border-radius': '2px', padding: '0 2px', 'font-style': 'normal' });
+            txtSpan.appendChild(mark);
+          } else {
+            txtSpan.appendChild(document.createTextNode(part));
+          }
+        });
+      } else {
+        txtSpan.textContent = preview || '（无文字内容）';
+      }
       css(txtSpan, {
         color: t.textSec, 'font-size': '12px', overflow: 'hidden',
         display: '-webkit-box', '-webkit-line-clamp': '2', '-webkit-box-orient': 'vertical',
@@ -637,17 +672,20 @@
   }
 
   function startKeepAlive() {
-    if (keepAliveTimer !== null) return;
-    keepAliveTimer = setInterval(() => {
-      inject();
+    if (keepAliveObserver) return;
+    keepAliveObserver = new MutationObserver(() => {
+      if (!document.getElementById('__cnav_panel') || !document.getElementById('__cnav_toggle')) {
+        inject();
+      }
       if (usingAbsolute) updateAbsolutePosition();
-    }, 5000);
+    });
+    keepAliveObserver.observe(document.body, { childList: true, subtree: false });
   }
 
   function stopKeepAlive() {
-    if (keepAliveTimer === null) return;
-    clearInterval(keepAliveTimer);
-    keepAliveTimer = null;
+    if (!keepAliveObserver) return;
+    keepAliveObserver.disconnect();
+    keepAliveObserver = null;
   }
 
   function stopPendingRefreshes() {
@@ -674,8 +712,10 @@
   function startMonitoring() {
     setupObserver();
     startKeepAlive();
-    refresh();
-    startTryRefreshLoop();
+    if (panelOpen) {
+      refresh();
+      startTryRefreshLoop();
+    }
   }
 
   function stopMonitoring() {
