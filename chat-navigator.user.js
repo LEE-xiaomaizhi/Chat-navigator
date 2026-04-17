@@ -70,6 +70,7 @@
   }
 
   // ── 状态 ──────────────────────────────────────────────────────────────────
+  const POS_KEY = '__cnav_pos__';
   const MONITOR_KEY = '__cnav_monitor__';
   let storedMonitorState = localStorage.getItem(MONITOR_KEY);
   if (storedMonitorState !== 'on' && storedMonitorState !== 'off') {
@@ -97,6 +98,39 @@
     b.addEventListener('mouseenter', () => css(b, { color: T().btnHoverColor, background: T().btnHoverBg }));
     b.addEventListener('mouseleave', () => css(b, { color: T().btnColor, background: 'none' }));
     return b;
+  }
+
+  function getSavedPosition() {
+    let pos = null;
+    try {
+      pos = JSON.parse(localStorage.getItem(POS_KEY) || 'null');
+    } catch(e) {
+      localStorage.removeItem(POS_KEY);
+    }
+    if (!pos || typeof pos.top !== 'number' || typeof pos.left !== 'number' ||
+        !Number.isFinite(pos.top) || !Number.isFinite(pos.left) ||
+        pos.top < 0 || pos.top > window.innerHeight - 40 ||
+        pos.left < 0 || pos.left > window.innerWidth - 40) {
+      if (pos) localStorage.removeItem(POS_KEY);
+      return null;
+    }
+    return pos;
+  }
+
+  function applySavedPosition(absolute = false) {
+    const pos = getSavedPosition();
+    if (!pos) return false;
+    const scrollX = absolute ? (window.scrollX || window.pageXOffset || 0) : 0;
+    const scrollY = absolute ? (window.scrollY || window.pageYOffset || 0) : 0;
+    css(panel, { top: (scrollY + pos.top) + 'px', left: (scrollX + pos.left) + 'px', right: 'auto' });
+    css(toggle, { top: (scrollY + pos.top) + 'px' });
+    return true;
+  }
+
+  function savePanelPosition() {
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    localStorage.setItem(POS_KEY, JSON.stringify({ top: rect.top, left: rect.left }));
   }
 
   function updateMonitorButton() {
@@ -251,12 +285,23 @@
       const r = panel.getBoundingClientRect();
       offX = e.clientX - r.left;
       offY = e.clientY - r.top;
+      document.addEventListener('mousemove', onDragMove);
+      document.addEventListener('mouseup', onDragEnd);
     });
-    document.addEventListener('mousemove', e => {
-      if (!dragging) return;
-      css(panel, { left: (e.clientX - offX) + 'px', top: (e.clientY - offY) + 'px', right: 'auto' });
-    });
-    document.addEventListener('mouseup', () => { dragging = false; });
+  }
+
+  function onDragMove(e) {
+    if (!dragging) return;
+    css(panel, { left: (e.clientX - offX) + 'px', top: (e.clientY - offY) + 'px', right: 'auto' });
+  }
+
+  function onDragEnd() {
+    if (dragging) {
+      dragging = false;
+      savePanelPosition();
+    }
+    document.removeEventListener('mousemove', onDragMove);
+    document.removeEventListener('mouseup', onDragEnd);
   }
 
   // ── 注入到页面 ────────────────────────────────────────────────────────────
@@ -270,6 +315,7 @@
     buildPanel();
     document.body.appendChild(panel);
     document.body.appendChild(toggle);
+    applySavedPosition();
     console.log('[ChatNav] panel injected');
     setTimeout(fixPositionFallback, 600);
   }
@@ -287,7 +333,7 @@
       usingAbsolute = true;
       css(panel,  { position: 'absolute' });
       css(toggle, { position: 'absolute' });
-      updateAbsolutePosition();
+      if (!applySavedPosition(true)) updateAbsolutePosition();
     }
   }
 
@@ -296,6 +342,14 @@
     const scrollX = window.scrollX || window.pageXOffset || 0;
     const scrollY = window.scrollY || window.pageYOffset || 0;
     const panelHidden = panel.style.getPropertyValue('display') === 'none';
+    const pos = getSavedPosition();
+    if (pos) {
+      if (!panelHidden) {
+        css(panel, { top: (scrollY + pos.top) + 'px', left: (scrollX + pos.left) + 'px', right: 'auto' });
+      }
+      css(toggle, { top: (scrollY + pos.top) + 'px', left: (scrollX + window.innerWidth - 38 - 16) + 'px', right: 'auto' });
+      return;
+    }
     if (!panelHidden) {
       css(panel, { top: (scrollY + 80) + 'px', left: (scrollX + window.innerWidth - 260 - 16) + 'px', right: 'auto' });
     }
@@ -515,7 +569,10 @@
 
     const raw = isChatGPT ? getChatGPTMessages() : getGeminiMessages();
     const signature = raw
-      .map(m => `${m.role}:${m.text.length}:${m.text.slice(0, 80)}:${m.text.slice(-80)}`)
+      .map(m => {
+        const t = m.text;
+        return `${m.role}:${t.length}:${t.slice(0, 60)}:${t.slice(Math.floor(t.length / 2) - 30, Math.floor(t.length / 2) + 30)}:${t.slice(-60)}`;
+      })
       .join('|');
 
     if (signature === lastMessageSignature && list && list.childElementCount > 0) {
