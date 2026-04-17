@@ -2,7 +2,7 @@
 // @name         Chat Navigator - Gemini & ChatGPT
 // @author       小麦汁
 // @namespace    http://tampermonkey.net/
-// @version      1.9
+// @version      2.0
 // @description  快速定位 Gemini 和 ChatGPT 历史对话，点击跳转到对应位置
 // @match        https://gemini.google.com/*
 // @match        https://chatgpt.com/*
@@ -596,14 +596,49 @@
 
       item.addEventListener('click', () => {
         activeIndex = index;
-        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        el.style.outline = '2px solid ' + t.activeBorder;
-        setTimeout(() => { el.style.outline = ''; }, 1200);
+        if (filterText) {
+          scrollToMatch(el, filterText);
+        } else {
+          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          el.style.outline = '2px solid ' + t.activeBorder;
+          setTimeout(() => { el.style.outline = ''; }, 1200);
+        }
         renderList();
       });
 
       list.appendChild(item);
     });
+  }
+
+  function scrollToMatch(el, keyword) {
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
+    let node;
+    while ((node = walker.nextNode())) {
+      const text = node.textContent || '';
+      const matchIndex = text.toLowerCase().indexOf(keyword.toLowerCase());
+      if (matchIndex === -1) continue;
+
+      const range = document.createRange();
+      range.setStart(node, matchIndex);
+      range.setEnd(node, matchIndex + keyword.length);
+      const span = document.createElement('span');
+      span.id = '__cnav_anchor__';
+      css(span, {
+        background: T().activeBorder, color: T().panelBg,
+        'border-radius': '2px', padding: '0 2px',
+        'font-size': 'inherit', 'line-height': 'inherit',
+        transition: 'opacity 0.8s',
+      });
+      range.insertNode(span);
+      span.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setTimeout(() => { span.style.opacity = '0'; }, 800);
+      setTimeout(() => { span.remove(); }, 1600);
+      return;
+    }
+
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    el.style.outline = '2px solid ' + T().activeBorder;
+    setTimeout(() => { el.style.outline = ''; }, 1200);
   }
 
   function refresh() {
@@ -645,7 +680,7 @@
 
   function isOwnNode(node) {
     if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
-    return node.closest('#__cnav_panel, #__cnav_toggle, #__cnav_style__');
+    return node.closest('#__cnav_panel, #__cnav_toggle, #__cnav_style__, #__cnav_anchor__');
   }
 
   function mutationIsOwnChange(mutation) {
