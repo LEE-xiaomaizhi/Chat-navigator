@@ -2,7 +2,7 @@
 // @name         Chat Navigator - Gemini & ChatGPT
 // @author       小麦汁
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.7
 // @description  快速定位 Gemini 和 ChatGPT 历史对话，点击跳转到对应位置
 // @match        https://gemini.google.com/*
 // @match        https://chatgpt.com/*
@@ -70,11 +70,19 @@
   }
 
   // ── 状态 ──────────────────────────────────────────────────────────────────
+  const MONITOR_KEY = '__cnav_monitor__';
+  let storedMonitorState = localStorage.getItem(MONITOR_KEY);
+  if (storedMonitorState !== 'on' && storedMonitorState !== 'off') {
+    storedMonitorState = 'off';
+    localStorage.setItem(MONITOR_KEY, storedMonitorState);
+  }
+  let monitoringEnabled = storedMonitorState === 'on';
   let allMessages = [], filterText = '', activeIndex = -1;
   let lastMessageSignature = null;
   let panel, toggle, list, searchInput, countSpan;
-  let headerEl, searchDivEl, btnTheme, btnRefresh, btnClose;
+  let headerEl, searchDivEl, btnMonitor, btnTheme, btnRefresh, btnClose;
   let dragging = false, offX = 0, offY = 0;
+  let observer = null, keepAliveTimer = null, refreshTimer = null, tryRefreshTimer = null;
 
   // ── 创建按钮 ──────────────────────────────────────────────────────────────
   function makeBtn(text, title) {
@@ -91,6 +99,12 @@
     return b;
   }
 
+  function updateMonitorButton() {
+    if (!btnMonitor) return;
+    btnMonitor.textContent = monitoringEnabled ? '▶' : '⏸';
+    btnMonitor.title = monitoringEnabled ? '暂停监控' : '启用监控';
+  }
+
   // ── 应用主题到所有元素 ────────────────────────────────────────────────────
   function applyTheme() {
     const t = T();
@@ -101,9 +115,10 @@
     if (searchInput) css(searchInput, { background: t.inputBg, border: '1px solid ' + t.inputBorder, color: t.text });
     if (toggle)    css(toggle, { background: t.toggleBg, border: '1px solid ' + t.toggleBorder, color: t.toggleColor });
     // 按钮颜色
-    [btnTheme, btnRefresh, btnClose].forEach(b => {
+    [btnMonitor, btnTheme, btnRefresh, btnClose].forEach(b => {
       if (b) css(b, { color: t.btnColor });
     });
+    updateMonitorButton();
     if (btnTheme) btnTheme.textContent = isDark ? '☀' : '🌙';
     updateStyleTag();
     renderList(); // 重新渲染列表条目颜色
@@ -148,9 +163,11 @@
 
     const btnsDiv = document.createElement('span');
     css(btnsDiv, { display: 'flex', gap: '4px' });
+    btnMonitor = makeBtn(monitoringEnabled ? '▶' : '⏸', monitoringEnabled ? '暂停监控' : '启用监控');
     btnTheme   = makeBtn(isDark ? '☀' : '🌙', '切换主题');
     btnRefresh = makeBtn('↻', '刷新');
     btnClose   = makeBtn('×', '收起');
+    btnsDiv.appendChild(btnMonitor);
     btnsDiv.appendChild(btnTheme);
     btnsDiv.appendChild(btnRefresh);
     btnsDiv.appendChild(btnClose);
@@ -207,6 +224,10 @@
       isDark = !isDark;
       localStorage.setItem('__cnav_theme__', isDark ? 'dark' : 'light');
       applyTheme();
+    });
+    btnMonitor.addEventListener('click', e => {
+      e.stopPropagation();
+      setMonitoringEnabled(!monitoringEnabled);
     });
     btnRefresh.addEventListener('click', e => { e.stopPropagation(); refresh(); });
     btnClose.addEventListener('click', e => {
@@ -414,6 +435,13 @@
     list.replaceChildren();
     countSpan.textContent = ` (${allMessages.length})`;
     const t = T();
+    if (!monitoringEnabled) {
+      const paused = document.createElement('div');
+      css(paused, { 'text-align': 'center', color: t.textMuted, padding: '20px 12px', 'font-size': '12px' });
+      paused.textContent = '监控已暂停，点击启用';
+      list.appendChild(paused);
+      return;
+    }
     const lf = filterText.toLowerCase();
     const shown = filterText ? allMessages.filter(m => m.text.toLowerCase().includes(lf)) : allMessages;
 
@@ -477,6 +505,14 @@
   }
 
   function refresh() {
+    if (!monitoringEnabled) {
+      allMessages = [];
+      lastMessageSignature = null;
+      renderList();
+      if (usingAbsolute) updateAbsolutePosition();
+      return;
+    }
+
     const raw = isChatGPT ? getChatGPTMessages() : getGeminiMessages();
     const signature = raw
       .map(m => `${m.role}:${m.text.length}:${m.text.slice(0, 80)}:${m.text.slice(-80)}`)
@@ -495,12 +531,6 @@
   }
 
   // ── 保活 + 自动刷新 ──────────────────────────────────────────────────────
-  setInterval(() => {
-    inject();
-    if (usingAbsolute) updateAbsolutePosition();
-  }, 5000);
-
-  let refreshTimer = null;
   let lastAutoRefreshAt = 0;
 
   function isOwnNode(node) {
@@ -515,9 +545,12 @@
   }
 
   function scheduleRefresh(delay = 2000) {
+    if (!monitoringEnabled) return;
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => {
+      if (!monitoringEnabled) return;
       const run = () => {
+        if (!monitoringEnabled) return;
         lastAutoRefreshAt = Date.now();
         refresh();
       };
@@ -530,12 +563,83 @@
   }
 
   function setupObserver() {
+    if (observer) return;
     const target = document.body || document.documentElement;
-    new MutationObserver(mutations => {
+    observer = new MutationObserver(mutations => {
       if (mutations.length > 0 && mutations.every(mutationIsOwnChange)) return;
       const elapsed = Date.now() - lastAutoRefreshAt;
       scheduleRefresh(elapsed < 4000 ? 4000 - elapsed : 2000);
-    }).observe(target, { childList: true, subtree: true });
+    });
+    observer.observe(target, { childList: true, subtree: true });
+  }
+
+  function stopObserver() {
+    if (!observer) return;
+    observer.disconnect();
+    observer = null;
+  }
+
+  function startKeepAlive() {
+    if (keepAliveTimer !== null) return;
+    keepAliveTimer = setInterval(() => {
+      inject();
+      if (usingAbsolute) updateAbsolutePosition();
+    }, 5000);
+  }
+
+  function stopKeepAlive() {
+    if (keepAliveTimer === null) return;
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+  }
+
+  function stopPendingRefreshes() {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+    clearTimeout(tryRefreshTimer);
+    tryRefreshTimer = null;
+  }
+
+  function startTryRefreshLoop() {
+    stopPendingRefreshes();
+    let tries = 0;
+    function tryRefresh() {
+      tryRefreshTimer = null;
+      if (!monitoringEnabled) return;
+      refresh();
+      if (allMessages.length === 0 && tries++ < 15) {
+        tryRefreshTimer = setTimeout(tryRefresh, 1000);
+      }
+    }
+    tryRefreshTimer = setTimeout(tryRefresh, 500);
+  }
+
+  function startMonitoring() {
+    setupObserver();
+    startKeepAlive();
+    refresh();
+    startTryRefreshLoop();
+  }
+
+  function stopMonitoring() {
+    stopObserver();
+    stopKeepAlive();
+    stopPendingRefreshes();
+    allMessages = [];
+    activeIndex = -1;
+    lastMessageSignature = null;
+    renderList();
+  }
+
+  function setMonitoringEnabled(enabled) {
+    monitoringEnabled = enabled;
+    localStorage.setItem(MONITOR_KEY, enabled ? 'on' : 'off');
+    updateMonitorButton();
+    if (enabled) {
+      startMonitoring();
+    } else {
+      stopMonitoring();
+    }
   }
 
   window.addEventListener('scroll', () => {
@@ -549,13 +653,8 @@
       return;
     }
     inject();
-    setupObserver();
-    let tries = 0;
-    function tryRefresh() {
-      refresh();
-      if (allMessages.length === 0 && tries++ < 15) setTimeout(tryRefresh, 1000);
-    }
-    setTimeout(tryRefresh, 500);
+    renderList();
+    if (monitoringEnabled) startMonitoring();
   }
   start();
 
