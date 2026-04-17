@@ -2,7 +2,7 @@
 // @name         Chat Navigator - Gemini & ChatGPT
 // @author       小麦汁
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.9
 // @description  快速定位 Gemini 和 ChatGPT 历史对话，点击跳转到对应位置
 // @match        https://gemini.google.com/*
 // @match        https://chatgpt.com/*
@@ -87,6 +87,7 @@
   let monitoringEnabled = storedMonitorState === 'on';
   let allMessages = [], filterText = '', activeIndex = -1;
   let lastMessageSignature = null;
+  let shadowQueryCache = null, shadowQueryCacheTime = 0, lastUrl = location.href;
   let panel, toggle, list, searchInput, countSpan;
   let headerEl, searchDivEl, btnMonitor, btnTheme, btnRefresh, btnClose;
   let dragging = false, offX = 0, offY = 0;
@@ -462,33 +463,45 @@
     if (result.length > 0) return result;
 
     console.log('[ChatNav] Gemini: light DOM empty, trying shadow DOM traversal...');
-    result = trySelectors(sel => deepQueryAll(sel));
+    if (!shadowQueryCache || Date.now() - shadowQueryCacheTime >= 10000) {
+      shadowQueryCache = deepQueryAll('*');
+      shadowQueryCacheTime = Date.now();
+    }
+    result = trySelectors(sel => shadowQueryCache.filter(el => {
+      try { return el.matches && el.matches(sel); } catch(e) { return false; }
+    }));
     if (result.length > 0) return result;
 
     console.log('[ChatNav] Gemini: selectors all failed, trying generic scan...');
     const messages = [];
+    const candidates = [];
     function scanShadow(root) {
-      const containers = root.querySelectorAll('div, section, main');
+      let containers;
+      try { containers = root.querySelectorAll('div, section, main'); } catch(e) { containers = []; }
       for (const c of containers) {
+        if (c.matches && c.matches('nav, header, footer, aside, [role="navigation"], [role="banner"], [role="complementary"]')) continue;
         const kids = Array.from(c.children).filter(ch => {
           const t = (ch.innerText || ch.textContent || '').trim();
-          return t.length > 2 && t.length < 50000;
+          return t.length >= 20 && t.length < 50000;
         });
-        if (kids.length >= 4) {
-          console.log('[ChatNav] Gemini generic: found container with', kids.length, 'text children, tag:', c.tagName, 'class:', (c.className || '').slice(0, 60));
-          kids.forEach((ch, i) => {
-            messages.push({ el: ch, role: i % 2 === 0 ? 'user' : 'ai', text: (ch.innerText || ch.textContent || '').trim() });
-          });
-          return true;
+        if (kids.length >= 6) {
+          candidates.push({ container: c, kids });
         }
       }
-      const els = root.querySelectorAll('*');
+      let els;
+      try { els = root.querySelectorAll('*'); } catch(e) { return; }
       for (const el of els) {
-        if (el.shadowRoot && scanShadow(el.shadowRoot)) return true;
+        if (el.shadowRoot) scanShadow(el.shadowRoot);
       }
-      return false;
     }
     scanShadow(document);
+    const best = candidates.sort((a, b) => b.kids.length - a.kids.length)[0];
+    if (best) {
+      console.log('[ChatNav] Gemini generic: found container with', best.kids.length, 'text children, tag:', best.container.tagName, 'class:', (best.container.className || '').slice(0, 60));
+      best.kids.forEach((ch, i) => {
+        messages.push({ el: ch, role: i % 2 === 0 ? 'user' : 'ai', text: (ch.innerText || ch.textContent || '').trim() });
+      });
+    }
     if (messages.length > 0) {
       console.log('[ChatNav] Gemini generic scan found', messages.length, 'messages');
       return messages;
@@ -594,6 +607,11 @@
   }
 
   function refresh() {
+    if (location.href !== lastUrl) {
+      shadowQueryCache = null;
+      shadowQueryCacheTime = 0;
+      lastUrl = location.href;
+    }
     if (!monitoringEnabled) {
       allMessages = [];
       lastMessageSignature = null;
