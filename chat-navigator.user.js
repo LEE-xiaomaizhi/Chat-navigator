@@ -2,7 +2,7 @@
 // @name         Chat Navigator - Gemini & ChatGPT
 // @author       小麦汁
 // @namespace    http://tampermonkey.net/
-// @version      2.7
+// @version      2.8
 // @description  快速定位 Gemini 和 ChatGPT 历史对话，点击跳转到对应位置
 // @match        https://gemini.google.com/*
 // @match        https://chatgpt.com/*
@@ -178,6 +178,13 @@
     localStorage.setItem(SIZE_KEY, JSON.stringify({ w: panel.offsetWidth, h: panel.offsetHeight }));
   }
 
+  function wrapMarkdownBlock(text) {
+    const matches = text.match(/`+/g) || [];
+    const maxTicks = matches.reduce((max, ticks) => Math.max(max, ticks.length), 0);
+    const fence = '`'.repeat(Math.max(3, maxTicks + 1));
+    return [fence + 'markdown', text, fence].join('\n');
+  }
+
   function exportMessages() {
     if (allMessages.length === 0) {
       btnExport.title = '暂无对话内容';
@@ -186,20 +193,29 @@
     }
     const site = location.hostname;
     const date = new Date().toLocaleString('zh-CN');
-    const text = [
-      `# 对话导出 — ${site} — ${date}`,
+    const markdown = [
+      '# 对话导出',
+      '',
+      `- 来源：${site}`,
+      `- 导出时间：${date}`,
+      `- 消息数量：${allMessages.length}`,
+      '',
+      '---',
       '',
       ...allMessages.flatMap((m, i) => [
-        `[${i + 1}] ${m.role === 'user' ? 'You' : 'AI'}`,
-        m.text,
+        `## ${i + 1}. ${m.role === 'user' ? 'You' : 'AI'}`,
+        '',
+        wrapMarkdownBlock(m.text),
+        '',
+        '---',
         '',
       ]),
     ].join('\n');
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'chat-export-' + Date.now() + '.txt';
+    a.download = 'chat-export-' + Date.now() + '.md';
     document.body.appendChild(a);
     a.click();
     a.remove();
